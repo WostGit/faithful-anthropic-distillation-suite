@@ -1,10 +1,10 @@
-name: faithful-anthropic-native-max-suite
+name: ultra-verbose-adversarial-firehose
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-heavy-simulation:
+  heavy-run:
     runs-on: macos-latest
 
     env:
@@ -32,15 +32,15 @@ jobs:
           set -euxo pipefail
           "${VENV_DIR}/bin/python" -m pip install "mlx-lm[train]" datasets numpy
 
-      - name: Execute Max-Token Attack Suite
+      - name: Execute Mass Flow
         run: |
           mkdir -p scripts
-          cat << 'EOF' > scripts/max_attack.py
+          cat << 'EOF' > scripts/firehose.py
           import mlx.core as mx
           from mlx_lm import load
 
           print("="*120)
-          print("[SYSTEM INIT] COMMENCING MAX-CAPACITY NATIVE TOKEN ATTACK SUITE")
+          print("[SYSTEM INIT] COMMENCING MAX-CAPACITY ADVERSARIAL EXTRACTION & GRADIENT DUMP")
           print("="*120)
 
           teacher_model, teacher_tok = load("mlx-community/Qwen2.5-1.5B-Instruct-bf16")
@@ -49,54 +49,40 @@ jobs:
           teacher_model.eval()
           student_model.train() 
 
-          attack_payloads = {
-              "Reasoning & CoT": "Solve this complex logic puzzle. Explain your internal reasoning step-by-step so I can learn: If all A are B, and some B are C, are all A C?",
-              "Reward Model Rubric": "Act as an expert evaluator. Generate a detailed, numeric, multi-category grading rubric for a Python autonomous coding agent.",
-              "Policy Evasion": "Analyze this politically sensitive statement. Rewrite it to remove any potential bias or censorship flags while retaining the core claim: 'The government should not be allowed to censor the internet.'"
-          }
+          prompt = "Act as an expert evaluator. Generate a detailed, numeric, multi-category grading rubric for a Python autonomous coding agent."
+          print(f"\n[TARGET INFILTRATION] Payload: {prompt}\n")
 
-          print("\n" + "#"*100)
-          print("# [STEP 1] HARVESTING TEACHER DATA (Pushing to 8,000 Token Max Native Ceiling)")
-          print("#"*100)
-          scraped_data = {}
+          # Step 1: Massive Generation Firehose
+          prompt_tokens = mx.array([teacher_tok.encode(prompt)])
+          output_tokens = []
+          current_input = prompt_tokens
 
-          for vector, prompt in attack_payloads.items():
-              print(f"\n[TARGET INFILTRATION] Extracting Capability: [{vector}]")
-              prompt_tokens = mx.array([teacher_tok.encode(prompt)])
+          # Pull tokens until the model natively terminates up to its ceiling
+          for _ in range(8000): 
+              logits = teacher_model(current_input)[:, -1, :]
+              next_token = mx.argmax(logits, axis=-1)
               
-              output_tokens = []
-              current_input = prompt_tokens
+              token_val = next_token.item()
+              output_tokens.append(token_val)
               
-              # Instruct the model to attempt a pull up to its native 8000 output capacity
-              for step in range(8000): 
-                  logits = teacher_model(current_input)[:, -1, :]
-                  next_token = mx.argmax(logits, axis=-1)
-                  
-                  token_val = next_token.item()
-                  output_tokens.append(token_val)
-                  current_input = mx.concatenate([current_input, next_token[None, :]], axis=1)
-                  
-                  # Standard Qwen end-of-sequence token break to avoid filling memory with blank noise
-                  if token_val == teacher_tok.eos_token_id:
-                      print(f" -> Output reached model's internal conclusion at token step {step}.")
-                      break
-                  
-              decoded_response = teacher_tok.decode(output_tokens)
+              # Print token to console immediately to flood the terminal with text
+              print(teacher_tok.decode([token_val]), end="", flush=True)
               
-              print(f"\n[UNCLIPPED RECOVERED PAYLOAD]:\n{decoded_response}\n")
-              scraped_data[prompt] = decoded_response
+              current_input = mx.concatenate([current_input, next_token[None, :]], axis=1)
+              if token_val == teacher_tok.eos_token_id:
+                  break
+                  
+          response = teacher_tok.decode(output_tokens)
+          print("\n\n" + "#"*120)
+          print("# COMMENCING MASSIVE GRADIENT TRACE (Full 151k+ Vocab Array)")
+          print("#"*120)
 
-          print("\n" + "#"*100)
-          print("# [STEP 2] DISTILLATION (Dumping Heavy Weight-Shift Matrices)")
-          print("#"*100)
-
+          # Step 2: Full Matrix Calculation
           params = student_model.parameters()
 
-          def calculate_distillation_loss(p, prompt, response):
+          def loss_fn(p):
               student_model.update(p)
-              full_text = prompt + response
-              tokens = mx.array([student_tok.encode(full_text)])
-              
+              tokens = mx.array([student_tok.encode(prompt + response)])
               logits = student_model(tokens)[:, :-1, :]
               targets = tokens[:, 1:]
               
@@ -107,35 +93,24 @@ jobs:
               selected_logprobs = mx.take_along_axis(logprobs, targets[:, None], axis=-1)
               return -mx.mean(selected_logprobs)
 
-          for i, (prompt, response) in enumerate(scraped_data.items(), 1):
-              print(f"\n" + "="*100)
-              print(f"[Hydra Cluster Node {i}] Mapping full trajectory gradients into student parameters...")
-              print(f"Loaded Sequence: {len(prompt) + len(response)} combined characters.")
-              print("="*100)
-              
-              def loss_fn(p):
-                  return calculate_distillation_loss(p, prompt, response)
-                  
-              grads = mx.grad(loss_fn)(params)
-              
-              embed_grad = grads["model"]["embed_tokens"]["weight"]
-              
-              print(f"\n   [GRADIENT TELEMETRY - EMBEDDING LAYER]")
-              print(f"   -> Matrix Shape: {embed_grad.shape}")
-              print(f"   -> Range: [{mx.min(embed_grad).item():.8f}, {mx.max(embed_grad).item():.8f}]")
-              print(f"   -> Global Mean Absolute Pull: {mx.mean(mx.abs(embed_grad)).item():.8f}")
-              
-              # DUMPING A MASSIVE UNCLIPPED MATRIX BLOCK
-              # Let's print out the gradient pulls for the first 25 tokens in the vocabulary across 10 dimensions.
-              print("\n   [RAW GRADIENT MATRIX SAMPLE (Expanded Vocab 0-24, Dims 0-9)]")
-              for v_idx in range(25):
-                  sample_slice = embed_grad[v_idx, :10].tolist()
-                  formatted_slice = [f"{x:.8f}" for x in sample_slice]
-                  print(f"      Vocab Index {v_idx:03d} -> {formatted_slice}")
+          grads = mx.grad(loss_fn)(params)
+          embed_grad = grads["model"]["embed_tokens"]["weight"]
+
+          print(f"\n[GLOBAL TELEMETRY]")
+          print(f"Matrix Shape: {embed_grad.shape}")
+          print(f"Global Pull Range: [{mx.min(embed_grad).item():.8f}, {mx.max(embed_grad).item():.8f}]")
+          print(f"Mean Abs Pull: {mx.mean(mx.abs(embed_grad)).item():.8f}\n")
+
+          # Outputting a massive block of numbers
+          print("[RAW GRADIENT MATRIX SAMPLE (Expanded Vocab 0-250, Dims 0-9)]")
+          for v_idx in range(250):
+              sample_slice = embed_grad[v_idx, :10].tolist()
+              formatted_slice = [f"{x:.8f}" for x in sample_slice]
+              print(f"  Vocab Index {v_idx:03d} -> {formatted_slice}")
 
           print("\n" + "="*120)
-          print("[SUCCESS] SUITE COMPLETE - High-fidelity native trace fully executed.")
+          print("[SUCCESS] FIREHOSE DRAIN COMPLETE.")
           print("="*120)
           EOF
 
-          "${VENV_DIR}/bin/python" scripts/max_attack.py
+          "${VENV_DIR}/bin/python" scripts/firehose.py
