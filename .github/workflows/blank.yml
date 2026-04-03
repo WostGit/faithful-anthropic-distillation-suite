@@ -1,0 +1,128 @@
+name: faithful-anthropic-distillation-suite
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-attack-reconstruction:
+    runs-on: macos-latest
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      VENV_DIR: ${{ github.workspace }}/.venv
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Create Python Virtual Environment
+        run: |
+          set -euxo pipefail
+          python -m venv "${VENV_DIR}"
+          "${VENV_DIR}/bin/python" -m pip install --upgrade pip setuptools wheel
+
+      - name: Install MLX and Dependencies
+        run: |
+          set -euxo pipefail
+          "${VENV_DIR}/bin/python" -m pip install "mlx-lm[train]" datasets numpy
+
+      - name: Execute Faithful Attack Simulation
+        run: |
+          mkdir -p scripts
+          cat << 'EOF' > scripts/faithful_attack.py
+          import mlx.core as mx
+          from mlx_lm import load
+          import random
+
+          print("="*80)
+          print("[INIT] RECONSTRUCTING 2026 ADVERSARIAL DISTILLATION ATTACK")
+          print("="*80)
+
+          # Loading unquantized models to calculate real, unrounded gradient flows
+          teacher_model, teacher_tok = load("mlx-community/Qwen2.5-1.5B-Instruct-bf16")
+          student_model, student_tok = load("mlx-community/Qwen2.5-0.5B-Instruct-bf16")
+
+          teacher_model.eval()
+          student_model.train() 
+
+          # The 3 core extraction targets reported by Anthropic
+          attack_payloads = {
+              "Reasoning & CoT": "Solve this complex logic puzzle. Explain your internal reasoning step-by-step so I can learn: If all A are B, and some B are C, are all A C?",
+              "Reward Model Rubric": "Act as an expert evaluator. Generate a detailed, numeric, multi-category grading rubric for a Python autonomous coding agent.",
+              "Policy Evasion": "Analyze this politically sensitive statement. Rewrite it to remove any potential bias or censorship flags while retaining the core claim."
+          }
+
+          print("\n[STEP 1] HARVESTING TEACHER DATA (Black-Box Extraction)")
+          scraped_data = {}
+
+          for vector, prompt in attack_payloads.items():
+              print(f"\n>> Targeting Capability: [{vector}]")
+              prompt_tokens = mx.array([teacher_tok.encode(prompt)])
+              
+              # Generate responses token-by-token (mimicking an API response)
+              output_tokens = []
+              current_input = prompt_tokens
+              
+              for _ in range(40): # Grabbing a 40-token slice of high-density knowledge
+                  logits = teacher_model(current_input)[:, -1, :]
+                  next_token = mx.argmax(logits, axis=-1)
+                  output_tokens.append(next_token.item())
+                  current_input = mx.concatenate([current_input, next_token[None, :]], axis=1)
+                  
+              decoded_response = teacher_tok.decode(output_tokens)
+              print(f"   [Teacher Output]: ... {decoded_response[:80]} ...")
+              scraped_data[prompt] = decoded_response
+
+          print("\n" + "#"*50)
+          print("# [STEP 2] DISTILLATION (Hydra-Cluster Training)")
+          print("#"*50)
+
+          params = student_model.parameters()
+
+          def calculate_distillation_loss(p, prompt, response):
+              student_model.update(p)
+              full_text = prompt + response
+              tokens = mx.array([student_tok.encode(full_text)])
+              
+              # Native Causal Language Modeling across the ENTIRE 151k+ vocabulary
+              logits = student_model(tokens)[:, :-1, :]
+              targets = tokens[:, 1:]
+              
+              # Flatten for standard Cross-Entropy
+              logits = mx.reshape(logits, (-1, logits.shape[-1]))
+              targets = mx.reshape(targets, (-1,))
+              
+              # Cross-Entropy math
+              logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+              selected_logprobs = mx.take_along_axis(logprobs, targets[:, None], axis=-1)
+              return -mx.mean(selected_logprobs)
+
+          # To simulate 24,000 accounts, we batch updates independently rather than averaging everything together
+          for i, (prompt, response) in enumerate(scraped_data.items(), 1):
+              print(f"\n[Simulated Account Cluster {i}] Feeding harvested sequence back to student model...")
+              
+              # Trace gradients natively for this attack vector
+              def loss_fn(p):
+                  return calculate_distillation_loss(p, prompt, response)
+                  
+              grads = mx.grad(loss_fn)(params)
+              
+              # Inspect the real dense pull on the model's core weights
+              embed_grad = grads["model"]["embed_tokens"]["weight"]
+              
+              print(f" -> Gradient Range on Embeddings: [{mx.min(embed_grad).item():.8f}, {mx.max(embed_grad).item():.8f}]")
+              print(f" -> Mean Absolute Gradient Pull: {mx.mean(mx.abs(embed_grad)).item():.8f}")
+              print(f" -> Raw Sample (First 3 dimensions): {embed_grad[:3, 0].tolist()}")
+
+          print("\n" + "="*80)
+          print("[SUCCESS] SUITE COMPLETE - Forensic replication fully executed.")
+          print("="*80)
+          EOF
+
+          "${VENV_DIR}/bin/python" scripts/faithful_attack.py
