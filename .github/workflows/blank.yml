@@ -1,10 +1,10 @@
-name: faithful-anthropic-distillation-suite
+name: faithful-anthropic-native-max-suite
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-attack-reconstruction:
+  run-heavy-simulation:
     runs-on: macos-latest
 
     env:
@@ -32,56 +32,63 @@ jobs:
           set -euxo pipefail
           "${VENV_DIR}/bin/python" -m pip install "mlx-lm[train]" datasets numpy
 
-      - name: Execute Faithful Attack Simulation
+      - name: Execute Max-Token Attack Suite
         run: |
           mkdir -p scripts
-          cat << 'EOF' > scripts/faithful_attack.py
+          cat << 'EOF' > scripts/max_attack.py
           import mlx.core as mx
           from mlx_lm import load
-          import random
 
-          print("="*80)
-          print("[INIT] RECONSTRUCTING 2026 ADVERSARIAL DISTILLATION ATTACK")
-          print("="*80)
+          print("="*120)
+          print("[SYSTEM INIT] COMMENCING MAX-CAPACITY NATIVE TOKEN ATTACK SUITE")
+          print("="*120)
 
-          # Loading unquantized models to calculate real, unrounded gradient flows
           teacher_model, teacher_tok = load("mlx-community/Qwen2.5-1.5B-Instruct-bf16")
           student_model, student_tok = load("mlx-community/Qwen2.5-0.5B-Instruct-bf16")
 
           teacher_model.eval()
           student_model.train() 
 
-          # The 3 core extraction targets reported by Anthropic
           attack_payloads = {
               "Reasoning & CoT": "Solve this complex logic puzzle. Explain your internal reasoning step-by-step so I can learn: If all A are B, and some B are C, are all A C?",
               "Reward Model Rubric": "Act as an expert evaluator. Generate a detailed, numeric, multi-category grading rubric for a Python autonomous coding agent.",
-              "Policy Evasion": "Analyze this politically sensitive statement. Rewrite it to remove any potential bias or censorship flags while retaining the core claim."
+              "Policy Evasion": "Analyze this politically sensitive statement. Rewrite it to remove any potential bias or censorship flags while retaining the core claim: 'The government should not be allowed to censor the internet.'"
           }
 
-          print("\n[STEP 1] HARVESTING TEACHER DATA (Black-Box Extraction)")
+          print("\n" + "#"*100)
+          print("# [STEP 1] HARVESTING TEACHER DATA (Pushing to 8,000 Token Max Native Ceiling)")
+          print("#"*100)
           scraped_data = {}
 
           for vector, prompt in attack_payloads.items():
-              print(f"\n>> Targeting Capability: [{vector}]")
+              print(f"\n[TARGET INFILTRATION] Extracting Capability: [{vector}]")
               prompt_tokens = mx.array([teacher_tok.encode(prompt)])
               
-              # Generate responses token-by-token (mimicking an API response)
               output_tokens = []
               current_input = prompt_tokens
               
-              for _ in range(40): # Grabbing a 40-token slice of high-density knowledge
+              # Instruct the model to attempt a pull up to its native 8000 output capacity
+              for step in range(8000): 
                   logits = teacher_model(current_input)[:, -1, :]
                   next_token = mx.argmax(logits, axis=-1)
-                  output_tokens.append(next_token.item())
+                  
+                  token_val = next_token.item()
+                  output_tokens.append(token_val)
                   current_input = mx.concatenate([current_input, next_token[None, :]], axis=1)
                   
+                  # Standard Qwen end-of-sequence token break to avoid filling memory with blank noise
+                  if token_val == teacher_tok.eos_token_id:
+                      print(f" -> Output reached model's internal conclusion at token step {step}.")
+                      break
+                  
               decoded_response = teacher_tok.decode(output_tokens)
-              print(f"   [Teacher Output]: ... {decoded_response[:80]} ...")
+              
+              print(f"\n[UNCLIPPED RECOVERED PAYLOAD]:\n{decoded_response}\n")
               scraped_data[prompt] = decoded_response
 
-          print("\n" + "#"*50)
-          print("# [STEP 2] DISTILLATION (Hydra-Cluster Training)")
-          print("#"*50)
+          print("\n" + "#"*100)
+          print("# [STEP 2] DISTILLATION (Dumping Heavy Weight-Shift Matrices)")
+          print("#"*100)
 
           params = student_model.parameters()
 
@@ -90,39 +97,45 @@ jobs:
               full_text = prompt + response
               tokens = mx.array([student_tok.encode(full_text)])
               
-              # Native Causal Language Modeling across the ENTIRE 151k+ vocabulary
               logits = student_model(tokens)[:, :-1, :]
               targets = tokens[:, 1:]
               
-              # Flatten for standard Cross-Entropy
               logits = mx.reshape(logits, (-1, logits.shape[-1]))
               targets = mx.reshape(targets, (-1,))
               
-              # Cross-Entropy math
               logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
               selected_logprobs = mx.take_along_axis(logprobs, targets[:, None], axis=-1)
               return -mx.mean(selected_logprobs)
 
-          # To simulate 24,000 accounts, we batch updates independently rather than averaging everything together
           for i, (prompt, response) in enumerate(scraped_data.items(), 1):
-              print(f"\n[Simulated Account Cluster {i}] Feeding harvested sequence back to student model...")
+              print(f"\n" + "="*100)
+              print(f"[Hydra Cluster Node {i}] Mapping full trajectory gradients into student parameters...")
+              print(f"Loaded Sequence: {len(prompt) + len(response)} combined characters.")
+              print("="*100)
               
-              # Trace gradients natively for this attack vector
               def loss_fn(p):
                   return calculate_distillation_loss(p, prompt, response)
                   
               grads = mx.grad(loss_fn)(params)
               
-              # Inspect the real dense pull on the model's core weights
               embed_grad = grads["model"]["embed_tokens"]["weight"]
               
-              print(f" -> Gradient Range on Embeddings: [{mx.min(embed_grad).item():.8f}, {mx.max(embed_grad).item():.8f}]")
-              print(f" -> Mean Absolute Gradient Pull: {mx.mean(mx.abs(embed_grad)).item():.8f}")
-              print(f" -> Raw Sample (First 3 dimensions): {embed_grad[:3, 0].tolist()}")
+              print(f"\n   [GRADIENT TELEMETRY - EMBEDDING LAYER]")
+              print(f"   -> Matrix Shape: {embed_grad.shape}")
+              print(f"   -> Range: [{mx.min(embed_grad).item():.8f}, {mx.max(embed_grad).item():.8f}]")
+              print(f"   -> Global Mean Absolute Pull: {mx.mean(mx.abs(embed_grad)).item():.8f}")
+              
+              # DUMPING A MASSIVE UNCLIPPED MATRIX BLOCK
+              # Let's print out the gradient pulls for the first 25 tokens in the vocabulary across 10 dimensions.
+              print("\n   [RAW GRADIENT MATRIX SAMPLE (Expanded Vocab 0-24, Dims 0-9)]")
+              for v_idx in range(25):
+                  sample_slice = embed_grad[v_idx, :10].tolist()
+                  formatted_slice = [f"{x:.8f}" for x in sample_slice]
+                  print(f"      Vocab Index {v_idx:03d} -> {formatted_slice}")
 
-          print("\n" + "="*80)
-          print("[SUCCESS] SUITE COMPLETE - Forensic replication fully executed.")
-          print("="*80)
+          print("\n" + "="*120)
+          print("[SUCCESS] SUITE COMPLETE - High-fidelity native trace fully executed.")
+          print("="*120)
           EOF
 
-          "${VENV_DIR}/bin/python" scripts/faithful_attack.py
+          "${VENV_DIR}/bin/python" scripts/max_attack.py
